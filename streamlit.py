@@ -16,91 +16,104 @@ from apis import keys
 
 model_id = 'ericzzz/falcon-rw-1b-instruct-openorca'
 
-if 'pipeline' not in st.session_state :
-
-    st.session_state.tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-    st.session_state.pipeline = transformers.pipeline(
+@st.cache_resource
+def load_model() :
+    print("Initializing Models ...")
+    torch.cuda.empty_cache()
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    pipeline = transformers.pipeline(
     'text-generation',
     model=model_id,
-    tokenizer=st.session_state.tokenizer,
+    tokenizer=tokenizer,
     torch_dtype=torch.bfloat16,
     device_map='auto',
     )
+    return pipeline
 
-st.title("PDF Q&A")
     
-st.write('PDF')
-    
+def main(pipeline) :
 
-uploaded_file = st.file_uploader('Choose your .pdf file', type="pdf")
+    st.title("PDF Q&A")
+        
+    st.write('PDF')
+        
 
-if uploaded_file and 'uploaded' not in st.session_state:
-    
-    st.session_state.uploaded = True
-    filename = 'temp.pdf'
-    with open(filename, 'wb') as f: 
-        f.write(uploaded_file.getvalue())
+    uploaded_file = st.file_uploader('Choose your .pdf file', type="pdf")
 
-    data = PyPDFLoader('temp.pdf')
-    pdf = data.load()
+    if uploaded_file and 'uploaded' not in st.session_state:
+        
+        st.session_state.uploaded = True
+        filename = 'temp.pdf'
+        with open(filename, 'wb') as f: 
+            f.write(uploaded_file.getvalue())
 
-    # Step 2: Transform (Split)
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0, separators=[
-                                                "\n\n", "\n", "(?<=\. )", " "], length_function=len)
-    docs = text_splitter.split_documents(pdf)
-    #print('Split into ' + str(len(docs)) + ' docs')
+        data = PyPDFLoader('temp.pdf')
+        pdf = data.load()
 
-    # Step 3: Embed
-    # https://api.python.langchain.com/en/latest/embeddings/langchain.embeddings.openai.OpenAIEmbeddings.html
+        # Step 2: Transform (Split)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0, separators=[
+                                                    "\n\n", "\n", "(?<=\. )", " "], length_function=len)
+        docs = text_splitter.split_documents(pdf)
+        #print('Split into ' + str(len(docs)) + ' docs')
 
-    gpt4all_embd = GPT4AllEmbeddings()
+        # Step 3: Embed
+        # https://api.python.langchain.com/en/latest/embeddings/langchain.embeddings.openai.OpenAIEmbeddings.html
 
-    # Step 4: Store
-    # Initialize MongoDB python client
-    client = MongoClient(keys['MONGO_STR'], server_api=ServerApi('1'))
-    collection = client['try']['vec']
+        gpt4all_embd = GPT4AllEmbeddings()
 
-    # # Reset w/out deleting the Search Index 
-    collection.delete_many({})
+        # Step 4: Store
+        # Initialize MongoDB python client
+        client = MongoClient(keys['MONGO_STR'], server_api=ServerApi('1'))
+        collection = client['try']['vec']
 
-    docsearch = MongoDBAtlasVectorSearch.from_documents(
-        docs, gpt4all_embd, collection=collection, index_name = "vector_index"
-    )
+        # # Reset w/out deleting the Search Index 
+        collection.delete_many({})
 
-
-query = st.text_input('Enter your question here!')
-
-if query and st.session_state.uploaded: 
-
-    vector_search = MongoDBAtlasVectorSearch.from_connection_string(
-        keys['MONGO_STR'],
-        "try" + "." + "vec",
-        GPT4AllEmbeddings(),
-        index_name="vector_index",
-    )
+        docsearch = MongoDBAtlasVectorSearch.from_documents(
+            docs, gpt4all_embd, collection=collection, index_name = "vector_index"
+        )
 
 
-    results = vector_search.similarity_search_with_score(
-        query=query, k=2
-    )
+    query = st.text_input('Enter your question here!')
+
+    if query: 
+
+        if 'uploaded' not in st.session_state :
+            st.error('Please upload a PDF', icon="🚨")
+        
+        else :
+            vector_search = MongoDBAtlasVectorSearch.from_connection_string(
+                keys['MONGO_STR'],
+                "try" + "." + "vec",
+                GPT4AllEmbeddings(),
+                index_name="vector_index",
+            )
 
 
-    context = ''
+            results = vector_search.similarity_search_with_score(
+                query=query, k=2
+            )
 
-    for result in results:
-        context += result[0].page_content
+
+            context = ''
+
+            for result in results:
+                context += result[0].page_content
 
 
-    system_message = 'You are a helpful assistant. Give answers only if the information is present in the context, if information is not present answer with "Information is not present."'
-    prompt = f'<SYS> {system_message} <CONTEXT> {context} <INST> {query} <RESP> '
+            system_message = 'You are a helpful assistant. Give answers only if the information is present in the context, if information is not present answer with "Information is not present."'
+            prompt = f'<SYS> {system_message} <CONTEXT> {context} <INST> {query} <RESP> '
 
-    response = st.session_state.pipeline(
-    prompt, 
-    max_length=512,
-    repetition_penalty=1.05
-    )
+            response = pipeline(
+            prompt, 
+            max_length=1024,
+            repetition_penalty=1.05
+            )
 
-    response = response[0]['generated_text'].split("<RESP>")[-1]
+            response = response[0]['generated_text'].split("<RESP>")[-1]
 
-    st.write(response)
+            st.write(response)
+
+if __name__ == "__main__" :
+    pipeline = load_model()
+    main(pipeline)
